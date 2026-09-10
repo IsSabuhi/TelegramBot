@@ -69,13 +69,21 @@ python -m bot
 
 Напишите боту `/start`, затем отправьте ссылку на публичное видео.
 
-## Docker (сервер, до ~50 МБ)
+## Docker (сервер Ubuntu, до ~50 МБ)
 
-На сервере нужен Docker (или `docker compose`). ffmpeg уже внутри образа.
+Colima на сервере не нужен. `TELEGRAM_API_URL=http://127.0.0.1:8081` из `.env` с ноутбука **ломает** контейнер: localhost внутри бота — это он сам.
+
+Обычный запуск (облако Telegram, лимит ~50 МБ):
 
 ```bash
-cp .env.example .env   # пропишите BOT_TOKEN и ALLOWED_USER_IDS
+# TELEGRAM_API_URL оставьте пустым
 docker compose up -d --build
+```
+
+До 2 ГБ — два файла compose и ключи с my.telegram.org:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.large.yml up -d --build
 ```
 
 На части машин команда с дефисом: `docker-compose`.

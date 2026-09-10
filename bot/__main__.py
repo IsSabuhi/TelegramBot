@@ -2,6 +2,8 @@ import asyncio
 import logging
 import socket
 import sys
+import time
+from pathlib import Path
 from urllib.parse import urlparse
 
 from telegram import BotCommand
@@ -20,24 +22,47 @@ from bot.handlers import help_cmd, on_cancel_job, on_quality, on_text, sites_cmd
 from bot.logging_setup import setup_logging
 
 
+def _in_docker() -> bool:
+    return Path("/.dockerenv").exists()
+
+
 def _ensure_local_api() -> None:
     if not USING_LOCAL_API or not TELEGRAM_API_URL:
         return
     parsed = urlparse(TELEGRAM_API_URL)
     host = parsed.hostname or "127.0.0.1"
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
-    try:
-        with socket.create_connection((host, port), timeout=3):
-            return
-    except OSError:
-        sys.stderr.write(
-            f"Локальный Bot API не отвечает на {TELEGRAM_API_URL}\n"
-            "Бот сам по себе этот сервер не запускает. Сначала:\n"
-            "  colima start   # если Docker ещё не запущен\n"
-            "  docker-compose -f docker-compose.api.yml up -d\n"
-            "Проверка: curl -sS http://127.0.0.1:8081 || docker-compose -f docker-compose.api.yml logs\n"
+    for _ in range(20):
+        try:
+            with socket.create_connection((host, port), timeout=2):
+                return
+        except OSError:
+            time.sleep(0.5)
+
+    localhost = host in {"127.0.0.1", "localhost"}
+    if _in_docker():
+        hint = (
+            "Это контейнер: 127.0.0.1 здесь не сервер Ubuntu и не Colima.\n"
+            "\n"
+            "До 50 МБ (облако Telegram):\n"
+            "  в .env оставьте TELEGRAM_API_URL пустым\n"
+            "  docker compose up -d --build\n"
+            "\n"
+            "До 2 ГБ (локальный Bot API):\n"
+            "  в .env нужны TELEGRAM_API_ID и TELEGRAM_API_HASH\n"
+            "  docker compose -f docker-compose.yml -f docker-compose.large.yml up -d --build\n"
+            "  адрес внутри Docker: http://telegram-bot-api:8081\n"
         )
-        sys.exit(1)
+        if localhost:
+            hint += "\nСейчас в .env стоит localhost — контейнер бота стучится сам в себя.\n"
+    else:
+        hint = (
+            "Сначала поднимите локальный Bot API:\n"
+            "  docker compose -f docker-compose.api.yml up -d\n"
+            "Проверка: curl -sS http://127.0.0.1:8081\n"
+        )
+    sys.stderr.write(f"Локальный Bot API не отвечает на {TELEGRAM_API_URL}\n{hint}")
+    sys.exit(1)
 
 
 async def _post_init(application: Application) -> None:

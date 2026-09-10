@@ -6,6 +6,8 @@ services:
     environment:
       LOG_DIR: /app/logs
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # .env с ноутбука часто содержит 127.0.0.1:8081 — внутри контейнера это не работает.
+      TELEGRAM_API_URL: ""
     volumes:
       - downloads:/app/downloads
       - logs:/app/logs
