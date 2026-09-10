@@ -1,0 +1,28 @@
+services:
+  telegram-bot-api:
+    image: aiogram/telegram-bot-api:latest
+    environment:
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
+      TELEGRAM_LOCAL: "1"
+    volumes:
+      - downloads:/app/downloads
+      - bot-api-data:/var/lib/telegram-bot-api
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  bot:
+    environment:
+      TELEGRAM_API_URL: http://telegram-bot-api:8081
+      MAX_FILE_MB: "1900"
+      LOCAL_API_FILE_MODE: "1"
+      LOG_DIR: /app/logs
+    depends_on:
+      - telegram-bot-api
+
+volumes:
+  bot-api-data:
