@@ -52,7 +52,7 @@ def info_message(info: VideoInfo) -> str:
 START_TEXT = (
     "Пришлите ссылку на <b>публичное</b> видео — покажу доступные качества "
     "и скачаю выбранное.\n\n"
-    "Работает с открытыми роликами (YouTube, TikTok, Instagram Reels, X и другие "
+    "Работает с открытыми роликами (YouTube, TikTok, Instagram Reels, X, DION и другие "
     "площадки, которые отдаёт yt-dlp). Список: /sites\n\n"
     f"Ограничение Telegram: файл не больше {MAX_FILE_MB} МБ"
     + (
@@ -84,7 +84,8 @@ SITES_TEXT = (
     "• Facebook (открытые ролики)\n"
     "• VK\n"
     "• Vimeo\n"
-    "• Reddit\n\n"
+    "• Reddit\n"
+    "• DION — завершённые записи по ссылке dion.vc/video/… или HLS .m3u8\n\n"
     "Не работает: приватные аккаунты, сторис, закрытые профили, "
     "контент с логином, плейлисты целиком.\n\n"
     "Instagram и TikTok часто меняют защиту — если открытая ссылка вдруг "

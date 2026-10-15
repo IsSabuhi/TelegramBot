@@ -12,6 +12,7 @@ from pathlib import Path
 import yt_dlp
 
 from bot.config import DOWNLOADS_DIR, MAX_FILE_BYTES, MAX_FILE_MB, USING_LOCAL_API
+from bot.dion import DionIE
 from bot.models import (
     DownloadCancelled,
     DownloadError,
@@ -121,15 +122,25 @@ def _filesize(fmt: dict) -> int | None:
     return int(size) if size else None
 
 
+def _youtube_dl(opts: dict) -> yt_dlp.YoutubeDL:
+    ydl = yt_dlp.YoutubeDL(opts, auto_init=False)
+    # Custom extractors must precede Generic, which otherwise claims DION pages.
+    ydl.add_info_extractor(DionIE())
+    ydl.add_default_info_extractors()
+    return ydl
+
+
 def extract_info(url: str) -> VideoInfo:
     opts = _base_opts()
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
+        with _youtube_dl(opts) as ydl:
             info = ydl.extract_info(url, download=False)
     except yt_dlp.utils.DownloadError as exc:
         message = str(exc)
         if _is_private_error(message):
             raise PrivateContentError from exc
+        if DionIE.suitable(url):
+            raise DownloadError(f"Не удалось прочитать запись DION: {message}") from exc
         raise DownloadError(
             "Не удалось прочитать ссылку. Проверьте, что ролик открытый "
             "и площадка поддерживается."
@@ -196,10 +207,13 @@ def extract_info(url: str) -> VideoInfo:
             thumb = thumbs[-1].get("url")
 
     return VideoInfo(
-        url=info.get("webpage_url") or url,
+        url=url if DionIE.suitable(url) else info.get("webpage_url") or url,
         title=(info.get("title") or "video").strip(),
         duration=info.get("duration"),
-        extractor=info.get("extractor_key") or info.get("extractor") or "generic",
+        extractor=(
+            "DION" if DionIE.suitable(url)
+            else info.get("extractor_key") or info.get("extractor") or "generic"
+        ),
         qualities=qualities,
         has_audio=has_audio,
         thumbnail_url=thumb,
@@ -217,11 +231,15 @@ def _progress_hook(
     cancel_event: threading.Event | None,
 ) -> None:
     _raise_if_cancelled(cancel_event)
-    if on_progress is None:
-        return
     status = d.get("status")
     if status == "downloading":
         downloaded = int(d.get("downloaded_bytes") or 0)
+        if downloaded > MAX_FILE_BYTES:
+            raise FileTooLargeError(
+                downloaded / (1024 * 1024), MAX_FILE_MB, using_local_api=USING_LOCAL_API,
+            )
+        if on_progress is None:
+            return
         total = d.get("total_bytes") or d.get("total_bytes_estimate")
         total_i = int(total) if total else None
         percent = None
@@ -246,7 +264,7 @@ def _progress_hook(
                 detail=detail,
             )
         )
-    elif status == "finished":
+    elif status == "finished" and on_progress is not None:
         on_progress(ProgressEvent(stage="download", percent=100.0, detail="файл получен"))
 
 
@@ -301,7 +319,12 @@ def download(
         "windowsfilenames": False,
         "writethumbnail": True,
     }
-    if on_progress is not None or cancel_event is not None:
+    if DionIE.suitable(url):
+        # Do not silently produce an incomplete recording if a segment is missing.
+        opts["skip_unavailable_fragments"] = False
+        if height is None:
+            opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "m4a"}]
+    if on_progress is not None or cancel_event is not None or DionIE.suitable(url):
         opts["progress_hooks"] = [
             lambda d: _progress_hook(d, on_progress, cancel_event)
         ]
@@ -310,10 +333,10 @@ def download(
         ]
 
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
+        with _youtube_dl(opts) as ydl:
             info = ydl.extract_info(url, download=True)
             filename = ydl.prepare_filename(info)
-    except DownloadCancelled:
+    except (DownloadCancelled, FileTooLargeError):
         raise
     except yt_dlp.utils.DownloadError as exc:
         if cancel_event is not None and cancel_event.is_set():
@@ -321,6 +344,8 @@ def download(
         message = str(exc)
         if _is_private_error(message):
             raise PrivateContentError from exc
+        if DionIE.suitable(url) and "DION:" in message:
+            raise DownloadError(message) from exc
         if "larger than max-filesize" in message.lower() or "file is larger" in message.lower():
             raise FileTooLargeError(
                 MAX_FILE_MB + 1, MAX_FILE_MB, using_local_api=USING_LOCAL_API
@@ -342,6 +367,8 @@ def download(
     if not path.exists():
         stem = path.with_suffix("")
         for candidate in dest_dir.glob(stem.name + ".*"):
+            if candidate.suffix.lower() not in {".mp4", ".m4a", ".mkv", ".webm", ".ts"}:
+                continue
             path = candidate
             break
 
