@@ -20,6 +20,7 @@ from bot.config import (
 from bot.downloader import ensure_downloads_dir, ffmpeg_available
 from bot.handlers import help_cmd, on_cancel_job, on_quality, on_text, sites_cmd, start
 from bot.logging_setup import setup_logging
+from bot.telegram_limits import TelegramRateLimiter
 
 
 def _in_docker() -> bool:
@@ -111,6 +112,7 @@ def main() -> None:
     builder = (
         Application.builder()
         .token(BOT_TOKEN)
+        .rate_limiter(TelegramRateLimiter())
         .concurrent_updates(True)
         .connect_timeout(30)
         .pool_timeout(30)

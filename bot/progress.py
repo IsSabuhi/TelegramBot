@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from typing import Awaitable, Callable
 
 from html import escape
 
 from telegram.constants import ParseMode
-from telegram.error import TelegramError
+from telegram.error import RetryAfter, TelegramError
+
+from bot.telegram_limits import retry_seconds
+
+logger = logging.getLogger(__name__)
 
 EditFn = Callable[..., Awaitable[object]]
 
@@ -77,6 +82,8 @@ def render_progress(title: str, quality: str, event: ProgressEvent) -> str:
         extra = ""
         if event.downloaded is not None and event.total:
             extra = f"\n{_fmt_bytes(event.downloaded)} / {_fmt_bytes(event.total)}"
+        if event.percent is not None and event.percent >= 100:
+            extra += "\nФайл передан в Bot API. Ожидаю подтверждения Telegram…"
         return f"{heading}\n\n{bar_line}{extra}"
 
     detail = f" · {escape(event.detail)}" if event.detail else ""
@@ -105,7 +112,7 @@ class StatusProgress:
         edit: EditFn,
         title: str,
         quality: str,
-        interval: float = 1.2,
+        interval: float = 4.0,
         reply_markup=None,
     ) -> None:
         self._edit = edit
@@ -113,17 +120,26 @@ class StatusProgress:
         self.quality = quality
         self.interval = interval
         self.reply_markup = reply_markup
-        self._queue: asyncio.Queue[ProgressEvent] = asyncio.Queue()
+        self._queue: asyncio.Queue[ProgressEvent] = asyncio.Queue(maxsize=1)
         self._task: asyncio.Task[None] | None = None
         self._last_text = ""
         self._closed = False
         self.loop = asyncio.get_running_loop()
 
     def emit(self, event: ProgressEvent) -> None:
+        if self._closed:
+            return
         try:
-            self.loop.call_soon_threadsafe(self._queue.put_nowait, event)
+            self.loop.call_soon_threadsafe(self._offer, event)
         except RuntimeError:
             pass
+
+    def _offer(self, event: ProgressEvent) -> None:
+        if self._closed:
+            return
+        if self._queue.full():
+            self._queue.get_nowait()
+        self._queue.put_nowait(event)
 
     async def __aenter__(self) -> StatusProgress:
         self.emit(ProgressEvent(stage="download", percent=0, detail="начало"))
@@ -141,19 +157,11 @@ class StatusProgress:
             pass
 
     async def _pump(self) -> None:
-        latest: ProgressEvent | None = None
         while True:
-            try:
-                latest = await asyncio.wait_for(self._queue.get(), timeout=self.interval)
-                while True:
-                    try:
-                        latest = self._queue.get_nowait()
-                    except asyncio.QueueEmpty:
-                        break
-            except TimeoutError:
-                pass
-            if latest is not None:
-                await self._flush(latest)
+            latest = await self._queue.get()
+            await self._flush(latest)
+            # A timeout on queue.get() is not a throttle: a busy queue returns immediately.
+            await asyncio.sleep(self.interval)
 
     async def _flush(self, event: ProgressEvent) -> None:
         if self._closed:
@@ -168,6 +176,11 @@ class StatusProgress:
                 reply_markup=self.reply_markup,
             )
             self._last_text = text
+        except RetryAfter as exc:
+            # Also respect cooldown if StatusProgress is used with a plain Bot/test adapter.
+            delay = retry_seconds(exc) + 1.0
+            logger.warning("Telegram progress paused for %.1f seconds", delay)
+            await asyncio.sleep(delay)
         except TelegramError as exc:
             if "not modified" in str(exc).lower():
                 self._last_text = text

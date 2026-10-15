@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from telegram import Bot, InputFile, Update
 from telegram.constants import ChatAction, ParseMode
-from telegram.error import TelegramError
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import ContextTypes
 
 from bot.config import (
@@ -31,6 +31,7 @@ from bot.jobs import jobs
 from bot.keyboards import best_fitting, job_cancel_keyboard, quality_keyboard
 from bot.models import Job
 from bot.progress import ProgressEvent, StatusProgress
+from bot.telegram_limits import RequestControl
 from bot.text import (
     HELP_TEXT,
     SITES_TEXT,
@@ -274,6 +275,10 @@ async def process_job(job: Job, bot: Bot) -> None:
             path, thumb = await _download_with_fallback(job, workdir, progress.emit)
             if job.cancel.is_set():
                 raise DownloadCancelled
+            logger.info(
+                "Job %s downloaded (%.1f MB); sending to Telegram",
+                job.id, path.stat().st_size / (1024 * 1024),
+            )
             progress.emit(
                 ProgressEvent(
                     stage="upload",
@@ -292,6 +297,7 @@ async def process_job(job: Job, bot: Bot) -> None:
                 on_progress=progress.emit,
                 cancel_event=job.cancel,
             )
+        logger.info("Job %s sent to Telegram", job.id)
         await _edit_job(bot, job, f"Готово: {job.title[:80]}")
     except DownloadCancelled:
         await _edit_job(bot, job, "Отменено.")
@@ -416,7 +422,6 @@ async def _send_file(
         "connect_timeout": 60,
         "caption": caption,
     }
-    thumb_file = None
     if thumbnail and thumbnail.exists():
         send_kwargs["thumbnail"] = InputFile(thumbnail.read_bytes(), filename="thumb.jpg")
     if job.duration:
@@ -424,6 +429,9 @@ async def _send_file(
 
     emit = on_progress or (lambda _event: None)
     reader = ProgressReader(path, emit, cancel_event)
+    send_kwargs["rate_limit_args"] = RequestControl(
+        cancel=cancel_event, before_retry=lambda: reader.seek(0),
+    )
     media = InputFile(reader, filename=path.name, read_file_handle=False)
     try:
         if is_audio or path.suffix.lower() in {".m4a", ".mp3", ".ogg"}:
@@ -441,7 +449,7 @@ async def _send_file(
                 supports_streaming=True,
                 **send_kwargs,
             )
-        except TelegramError as exc:
+        except BadRequest as exc:
             if _is_too_large(exc):
                 raise FileTooLargeError(
                     size_mb, MAX_FILE_MB, using_local_api=USING_LOCAL_API
@@ -457,7 +465,7 @@ async def _send_file(
                         **send_kwargs,
                     )
                     return
-                except TelegramError:
+                except BadRequest:
                     pass
             reader.seek(0)
             await bot.send_document(
@@ -467,6 +475,7 @@ async def _send_file(
                 read_timeout=UPLOAD_TIMEOUT,
                 write_timeout=UPLOAD_TIMEOUT,
                 connect_timeout=60,
+                rate_limit_args=send_kwargs["rate_limit_args"],
             )
     except DownloadCancelled:
         raise
@@ -476,8 +485,7 @@ async def _send_file(
         if _is_too_large(exc):
             raise FileTooLargeError(size_mb, MAX_FILE_MB, using_local_api=USING_LOCAL_API) from exc
         raise
-    finally:
-        reader.close()
+    else:
         emit(
             ProgressEvent(
                 stage="upload",
@@ -486,6 +494,8 @@ async def _send_file(
                 total=path.stat().st_size,
             )
         )
+    finally:
+        reader.close()
 
 
 jobs.processor = process_job
